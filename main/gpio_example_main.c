@@ -1,10 +1,12 @@
 #include "driver/gpio.h"
-#include "driver/rmt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "driver/ledc.h"
+#include "esp_err.h"
 
 #define GPIO_OUTPUT_LED 2
 #define GPIO_OUTPUT_IR 14
@@ -14,6 +16,7 @@
    (1ULL << GPIO_OUTPUT_IR_POWER))
 #define GPIO_INPUT_IR 12
 #define GPIO_INPUT_PIN_SEL (1ULL << GPIO_INPUT_IR)
+#define ESP_INTR_FLAG_DEFAULT 0
 
 #define RMT_TX_CHANNEL RMT_CHANNEL_4
 #define RMT_TX_GPIO_NUM GPIO_NUM_14
@@ -23,104 +26,56 @@
 #define RMT_TICK_10_US (80000000 / RMT_CLK_DIV / 100000)
 #define rmt_item32_TIMEOUT_US 10000
 
-#define MAX_SIGNAL_LEN 1024*16
+#define MAX_SIGNAL_LEN 1024 * 8
+
+#define LEDC_HS_TIMER LEDC_TIMER_0
+#define LEDC_HS_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_HS_CH0_CHANNEL LEDC_CHANNEL_0
+
+#define LEDC_TEST_DUTY (2)
 
 bool ir_use = false;
 size_t received = 0;
-rmt_item32_t signals[MAX_SIGNAL_LEN];
 
-void print_signals(){
-  for (int i = 0; i < received; ++i) {
-    printf("%d ", signals[i].level0);
-    printf("%d ", signals[i].level1);
+bool signal_data[MAX_SIGNAL_LEN];
+int64_t signal_time[MAX_SIGNAL_LEN];
+int64_t sent_time[MAX_SIGNAL_LEN];
+int signal_pointer = 0;
+bool flag_received = false;
+bool flag_record = false;
+int64_t time_prev = 0;
+
+static void IRAM_ATTR gpio_isr_handler(void *arg) {
+  int64_t time_now;
+  time_now = esp_timer_get_time();
+  if (flag_record == true && flag_received == false) {
+    signal_pointer = 0;
+    flag_received = true;
+    flag_record = false;
+    time_prev = time_now;
   }
+  signal_time[signal_pointer] = time_now - time_prev;
+  signal_data[signal_pointer] = 1 - gpio_get_level(GPIO_INPUT_IR);
+  signal_pointer++;
+  time_prev = time_now;
+  // ets_printf(".");
+}
+
+static void print_buffer() {
+  int64_t time_sum = 0;
+  for (int i = 0; i < signal_pointer; i++) {
+    printf(" %d\t%d\t%d\t%d\n", (int)signal_time[i], (int)sent_time[i],
+           (int)(sent_time[i] - signal_time[i]), (int)signal_data[i]);
+    time_sum += signal_time[i];
+  }
+  printf("length=%d\n", signal_pointer);
+  printf("period=%d[us]", (int)time_sum);
   printf("\n");
-}
-
-void rmt_tx_task(void *dummy) {
-  printf("Tx\n");
-  if (received > 0) {
-    rmt_write_items(RMT_TX_CHANNEL, signals, received, true);
-    rmt_wait_tx_done(RMT_TX_CHANNEL, portMAX_DELAY);
-    printf("  done\n");
-  } else {
-    printf("  no data sent\n");
-  }
-  ir_use = false;
-  // vTaskDelete(NULL);
-  print_signals();
-}
-
-void rmt_rx_task(void *dummy) {
-  printf("Rx\n");
-  RingbufHandle_t rb = NULL;
-  rmt_get_ringbuf_handle(RMT_RX_CHANNEL, &rb);
-  rmt_rx_start(RMT_RX_CHANNEL, false);
-
-  size_t rx_size = 0;
-  printf("  wait ir signal...\n");
-  rmt_item32_t *item = (rmt_item32_t *)xRingbufferReceive(rb, &rx_size, 5000);
-  rmt_rx_stop(RMT_RX_CHANNEL);
-  if (!item) {
-    printf("  no data received\n");
-    ir_use = false;
-    // vTaskDelete(NULL);
-    return;
-  }
-  printf("  received length: %d\n", rx_size);
-
-  memcpy(signals, item, sizeof(rmt_item32_t) * rx_size);
-  for (int i = 0; i < rx_size; ++i) {
-    signals[i].level0 = ~signals[i].level0;
-    signals[i].level1 = ~signals[i].level1;
-  }
-  received = rx_size;
-  vRingbufferReturnItem(rb, (void *)item);
-
-  printf("  recv done\n");
-
-  rmt_rx_stop(RMT_RX_CHANNEL);
-  print_signals();
-  ir_use = false;
-  // vTaskDelete(NULL);
-}
-
-void init_tx() {
-  rmt_config_t rmt_tx;
-  rmt_tx.rmt_mode = RMT_MODE_TX;
-  rmt_tx.channel = RMT_TX_CHANNEL;
-  rmt_tx.gpio_num = RMT_TX_GPIO_NUM;
-  rmt_tx.mem_block_num = 4;
-  rmt_tx.clk_div = RMT_CLK_DIV;
-  rmt_tx.tx_config.loop_en = false;
-  rmt_tx.tx_config.carrier_duty_percent = 50;
-  rmt_tx.tx_config.carrier_freq_hz = 38000;
-  rmt_tx.tx_config.carrier_level = RMT_CARRIER_LEVEL_HIGH;
-  rmt_tx.tx_config.carrier_en = 1;
-  rmt_tx.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
-  rmt_tx.tx_config.idle_output_en = true;
-  rmt_config(&rmt_tx);
-  rmt_driver_install(rmt_tx.channel, 0, 0);
-}
-
-void init_rx() {
-  rmt_config_t rmt_rx;
-  rmt_rx.rmt_mode = RMT_MODE_RX;
-  rmt_rx.channel = RMT_RX_CHANNEL;
-  rmt_rx.clk_div = RMT_CLK_DIV;
-  rmt_rx.gpio_num = RMT_RX_GPIO_NUM;
-  rmt_rx.mem_block_num = 4;
-  rmt_rx.rx_config.filter_en = true;
-  rmt_rx.rx_config.filter_ticks_thresh = 100;
-  rmt_rx.rx_config.idle_threshold =
-      rmt_item32_TIMEOUT_US / 10 * (RMT_TICK_10_US);
-  rmt_config(&rmt_rx);
-  rmt_driver_install(rmt_rx.channel, 1000, 0);
 }
 
 void init_ir_sensor() {
   gpio_config_t io_conf;
-  io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+  io_conf.intr_type = GPIO_PIN_INTR_ANYEDGE;
   io_conf.mode = GPIO_MODE_OUTPUT;
   io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
   io_conf.pull_down_en = 0;
@@ -133,29 +88,66 @@ void init_ir_sensor() {
   gpio_config(&io_conf);
 
   gpio_set_level(GPIO_OUTPUT_IR_POWER, 1);
+
+  gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+  gpio_isr_handler_add(GPIO_INPUT_IR, gpio_isr_handler, (void *)GPIO_INPUT_IR);
+}
+
+static ledc_timer_config_t ledc_timer = {
+    .duty_resolution = LEDC_TIMER_1_BIT, // resolution of PWM duty
+    .freq_hz = 38000,                    // frequency of PWM signal
+    .speed_mode = LEDC_HS_MODE,          // timer mode
+    .timer_num = LEDC_HS_TIMER           // timer index
+};
+
+static ledc_channel_config_t ledc_channel = {.channel = LEDC_HS_CH0_CHANNEL,
+                                             .duty = 0,
+                                             .gpio_num = GPIO_OUTPUT_IR,
+                                             .speed_mode = LEDC_HS_MODE,
+                                             .timer_sel = LEDC_HS_TIMER};
+
+void init_ledc() {
+  ledc_timer_config(&ledc_timer);
+  ledc_channel_config(&ledc_channel);
+}
+
+static void send_buffer() {
+  int64_t time_now;
+  for (int i = 0; i < signal_pointer; i++) {
+    if (i != 0) {
+      ets_delay_us((int)signal_time[i] - 5);
+    }
+    time_now = esp_timer_get_time();
+    if (i == 0) {
+      time_prev = time_now;
+    }
+    sent_time[i] = time_now - time_prev;
+    ledc_set_duty(ledc_channel.speed_mode, ledc_channel.channel,
+                  (int)signal_data[i]);
+    ledc_update_duty(ledc_channel.speed_mode, ledc_channel.channel);
+    time_prev = time_now;
+  }
+  printf("sent\n");
 }
 
 void app_main() {
   init_ir_sensor();
-  init_tx();
-  init_rx();
-
-  int cnt = 0;
-  int dummy;
-
-  ir_use = true;
-  // xTaskCreate(rmt_rx_task, "rmt_rx_task", 2048, NULL, 10, NULL);
-  rmt_rx_task(&dummy);
+  init_ledc();
 
   while (1) {
 
-    ir_use = true;
-    // xTaskCreate(rmt_tx_task, "rmt_tx_task", 2048, NULL, 10, NULL);
-    rmt_tx_task(&dummy);
+    flag_record = true;
+    printf("receive wait ir sensor\n");
+    gpio_set_level(GPIO_OUTPUT_LED, 1);
+    gpio_intr_enable(GPIO_INPUT_IR);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    gpio_intr_disable(GPIO_INPUT_IR);
+    gpio_set_level(GPIO_OUTPUT_LED, 0);
+    flag_received = false;
 
-    gpio_set_level(GPIO_OUTPUT_LED, cnt % 2);
-    vTaskDelay(50 / portTICK_RATE_MS);
-    gpio_set_level(GPIO_OUTPUT_LED, cnt % 2);
-    vTaskDelay(1000 / portTICK_RATE_MS);
+    vTaskDelay(500 / portTICK_RATE_MS);
+    print_buffer();
+    send_buffer();
+    vTaskDelay(500 / portTICK_RATE_MS);
   }
 }
