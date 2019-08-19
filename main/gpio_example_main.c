@@ -1,12 +1,11 @@
 #include "driver/gpio.h"
+#include "driver/ledc.h"
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "driver/ledc.h"
-#include "esp_err.h"
 
 #define GPIO_OUTPUT_LED 2
 #define GPIO_OUTPUT_IR 14
@@ -18,24 +17,12 @@
 #define GPIO_INPUT_PIN_SEL (1ULL << GPIO_INPUT_IR)
 #define ESP_INTR_FLAG_DEFAULT 0
 
-#define RMT_TX_CHANNEL RMT_CHANNEL_4
-#define RMT_TX_GPIO_NUM GPIO_NUM_14
-#define RMT_RX_CHANNEL RMT_CHANNEL_0
-#define RMT_RX_GPIO_NUM GPIO_NUM_12
-#define RMT_CLK_DIV 100
-#define RMT_TICK_10_US (80000000 / RMT_CLK_DIV / 100000)
-#define rmt_item32_TIMEOUT_US 10000
-
-#define MAX_SIGNAL_LEN 1024 * 8
-
 #define LEDC_HS_TIMER LEDC_TIMER_0
 #define LEDC_HS_MODE LEDC_HIGH_SPEED_MODE
 #define LEDC_HS_CH0_CHANNEL LEDC_CHANNEL_0
-
 #define LEDC_TEST_DUTY (2)
 
-bool ir_use = false;
-size_t received = 0;
+#define MAX_SIGNAL_LEN 1024 * 8
 
 bool signal_data[MAX_SIGNAL_LEN];
 int64_t signal_time[MAX_SIGNAL_LEN];
@@ -63,6 +50,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg) {
 
 static void print_buffer() {
   int64_t time_sum = 0;
+  printf(" receive\tsent\tdiff\tdata\n");
   for (int i = 0; i < signal_pointer; i++) {
     printf(" %d\t%d\t%d\t%d\n", (int)signal_time[i], (int)sent_time[i],
            (int)(sent_time[i] - signal_time[i]), (int)signal_data[i]);
@@ -130,24 +118,26 @@ static void send_buffer() {
   printf("sent\n");
 }
 
-void app_main() {
-  init_ir_sensor();
-  init_ledc();
-
-  while (1) {
-
+void receive_signal(int wait_time){
+    vTaskDelay(200 / portTICK_RATE_MS);
     flag_record = true;
     printf("receive wait ir sensor\n");
     gpio_set_level(GPIO_OUTPUT_LED, 1);
     gpio_intr_enable(GPIO_INPUT_IR);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(wait_time / portTICK_RATE_MS);
     gpio_intr_disable(GPIO_INPUT_IR);
     gpio_set_level(GPIO_OUTPUT_LED, 0);
     flag_received = false;
+}
 
-    vTaskDelay(500 / portTICK_RATE_MS);
+void app_main() {
+  init_ir_sensor();
+  init_ledc();
+
+  receive_signal(5000);
+  while (1) {
     print_buffer();
     send_buffer();
-    vTaskDelay(500 / portTICK_RATE_MS);
+    vTaskDelay(1000 / portTICK_RATE_MS);
   }
 }
