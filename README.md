@@ -14,7 +14,7 @@ ESP32-IR-Recorder can control TVs, video recorders, air conditioners, etc. with 
   - FET (ex. IRFU9024NPBF)
 
 ## Requirement
-- [ESP-IDF:https://github.com/espressif/esp-idf]
+- [ESP-IDF](https://github.com/espressif/esp-idf)
 
 ## Usage
 - Turn on the ESP32.
